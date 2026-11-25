@@ -1,0 +1,854 @@
+# Packages installations
+
+```{r}
+# Install only the packages that are missing (CRAN + Bioconductor)
+cran_pkgs <- c("megatrees", "piggyback", "ape", "caper", "phytools",
+               "ggplot2", "ggnewscale", "dplyr", "tidyr")
+bioc_pkgs <- c("ggtree", "ggtreeExtra", "treeio")
+
+missing_cran <- setdiff(cran_pkgs, rownames(installed.packages()))
+if (length(missing_cran) > 0) install.packages(missing_cran)
+
+missing_bioc <- setdiff(bioc_pkgs, rownames(installed.packages()))
+if (length(missing_bioc) > 0) {
+  if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+  BiocManager::install(missing_bioc, ask = FALSE, update = FALSE)
+}
+
+# Paths: input data are read from data/, results are written to output/
+data_dir <- "data"
+out_dir  <- "output"
+dir.create(out_dir, showWarnings = FALSE)
+```
+# Download 100 trees from Upham
+
+```{r}
+library(megatrees)
+library(ape)
+
+full_tree_file <- file.path(data_dir, "Upham_100_full_mammal_trees.tre")
+
+# First run: download the trees and save them to data/
+if (!file.exists(full_tree_file)) {
+  trees <- get_tree_mammal_n100_vertlife()
+  write.tree(trees, file = full_tree_file)
+}
+
+# load an existing trees
+trees <- read.tree(full_tree_file)
+
+class(trees)
+length(trees)
+trees[[1]]
+```
+ 
+# Load species file 
+
+```{r}
+
+species <- readLines(
+  file.path(data_dir, "species_order_xyzw.txt")
+)
+```
+
+
+
+
+```{r}
+
+# Species cleanup - to be on the safe side
+species <- trimws(species)
+species <- species[!is.na(species)]
+species <- species[species != ""]
+species <- unique(species)
+
+# No need for gsub if already underscores, but harmless:
+species_tree <- gsub(" ", "_", species)
+
+#Take the first tree
+tree <- trees[[1]]
+
+#Verify which species intersect between the species list and the tree
+present <- intersect(species_tree, tree$tip.label)
+missing <- setdiff(species_tree, tree$tip.label)
+
+#Print results
+cat("Species requested:", length(species_tree), "\n")
+cat("Species found in tree:", length(present), "\n")
+cat("Missing species:", length(missing), "\n")
+print(missing)
+```
+```{r}
+#Save the full species names of the tree to a file
+tree <- trees[[1]]
+
+tree_names <- data.frame(tree_species = tree$tip.label)
+
+write.csv(
+  tree_names,
+  file.path(out_dir, "Upham_tree_tip_names.csv"),
+  row.names = FALSE
+)
+```
+
+
+
+```{r}
+# Mappings to match our organism names to the closest species in the tree
+
+name_fixes <- c(
+  "Dendrohyrax"              = "Procavia_capensis",
+  "Aonyx_cinereus"           = "Aonyx_cinerea",
+  "Mustela_putorius_furo"    = "Mustela_putorius",
+  "Rhinopoma_cystops"        = "Rhinopoma_hardwickii",
+  "Dasypus_beniensis"        = "Dasypus_novemcinctus",
+  "Osphranter_rufus"         = "Macropus_rufus",
+  "Notamacropus_rufogriseus" = "Macropus_rufogriseus",
+  "Equus_asinus"             = "Equus_africanus",
+  "Saimiri_cassiquiarensis"  = "Saimiri_sciureus"
+)
+
+# We drop this species since we already have the data for the closest species
+drop_species <- c(
+  "Cervus_hanglu_bactrianus",
+  "Sus_scrofa_domesticus",
+  "Canis_lupus_familiaris"
+)
+
+```
+
+```{r}
+#  Fix the species names in the list
+species_tree_curated <- species_tree
+
+species_tree_curated[species_tree_curated %in% names(name_fixes)] <-
+  name_fixes[species_tree_curated[species_tree_curated %in% names(name_fixes)]]
+
+# Drop species that would collide with already existing exact matches
+species_tree_curated <- species_tree_curated[!species_tree_curated %in% drop_species]
+
+# Check matching to Upham tree
+present <- intersect(species_tree_curated, trees[[1]]$tip.label)
+missing <- setdiff(species_tree_curated, trees[[1]]$tip.label)
+
+#Print results
+cat("Species after curation:", length(species_tree_curated), "\n")
+cat("Found in tree:", length(present), "\n")
+cat("Still missing:", length(missing), "\n")
+print(missing)
+```
+
+```{r}
+# Build the actual species list for the tree
+species_for_tree <- intersect(species_tree_curated, trees[[1]]$tip.label)
+
+# Prune each of the 100 trees for the corresponding species list
+pruned_trees <- lapply(trees, function(tr) {
+  drop.tip(tr, setdiff(tr$tip.label, species_for_tree))
+})
+
+# Make the trees an object with multi trees
+class(pruned_trees) <- "multiPhylo"
+
+# Save the pruned trees
+write.tree(
+  pruned_trees,
+  file = file.path(out_dir, "Upham_100trees_pruned_curated_species.tre")
+)
+
+# Print results
+length(pruned_trees)
+length(pruned_trees[[1]]$tip.label)
+```
+# Loading the species order to match the data for PGLS
+```{r}
+library(ape)
+library(caper)
+library(phytools)
+
+
+# 1. Read the species order that matches X/Y/Z/W rows
+species_order <- readLines(file.path(data_dir, "species_order_xyzw.txt"))
+
+# Cleanup - just in case
+species_order <- trimws(species_order)
+species_order <- species_order[species_order != ""]
+
+# Convert to tree-style names
+species_original <- gsub(" ", "_", species_order)
+
+# Print results
+length(species_original)
+head(species_original)
+```
+# Load the data for PGLS
+```{r}
+X <- read.csv(file.path(data_dir, "X_data.csv"), header = FALSE)[, 1]
+Y <- read.csv(file.path(data_dir, "Y_data.csv"), header = FALSE)[, 1]
+Z <- read.csv(file.path(data_dir, "Z_data.csv"), header = FALSE)[, 1]
+W <- read.csv(file.path(data_dir, "W_data.csv"), header = FALSE)[, 1]
+
+length(X); length(Y); length(Z); length(W); length(species_original)
+
+# Verify the lengths of the data with the species length
+stopifnot(
+  length(X) == length(species_original),
+  length(Y) == length(species_original),
+  length(Z) == length(species_original),
+  length(W) == length(species_original)
+)
+```
+
+# Build a dataframe with all of the data combined
+```{r}
+data_all <- data.frame(
+  original_species = species_original,
+  X = X,
+  Y = Y,
+  Z = Z,
+  W = W
+)
+
+# Check what rows 99 and 101 are
+data_all[c(99, 101), ]
+
+# Remove rows 99 and 101 - because they were reported to be outliers
+# (Meriones unguiculatus, Dolichotis patagonum)
+data_all <- data_all[-c(99, 101), ]
+
+# Confirm removal
+nrow(data_all)
+```
+
+```{r}
+# Insert original ordered organism names to the dataframe
+data_all$tree_species <- data_all$original_species
+
+#Fix the names
+data_all$tree_species[data_all$tree_species %in% names(name_fixes)] <-
+  name_fixes[data_all$tree_species[data_all$tree_species %in% names(name_fixes)]]
+
+#Drop the species we needs to remove in addition to the outliers (including their corresponding data)
+data_all$drop_from_pgls <- data_all$original_species %in% drop_species
+
+data_pgls <- data_all[!data_all$drop_from_pgls, ]
+```
+
+```{r}
+
+
+# Check if any tree species became duplicated (safety check)
+duplicated_tree_species <- data_pgls$tree_species[
+  duplicated(data_pgls$tree_species) | duplicated(data_pgls$tree_species, fromLast = TRUE)
+]
+
+duplicated_tree_species
+```
+# Check that all final tree_species names are present in the Upham tree
+```{r}
+tree <- trees[[1]]
+
+data_pgls$matched_to_Upham <- data_pgls$tree_species %in% tree$tip.label
+
+table(data_pgls$matched_to_Upham)
+
+data_pgls[!data_pgls$matched_to_Upham, c("original_species", "tree_species")]
+```
+
+
+
+```{r}
+
+# Save the data for PGLS on drive
+write.csv(
+  data_pgls,
+  file.path(out_dir, "PGLS_data_curated_Upham.csv"),
+  row.names = FALSE
+)
+
+# Prune each Upham tree to the final curated species set
+species_for_tree <- unique(data_pgls$tree_species)
+
+pruned_trees <- lapply(trees, function(tr) {
+  drop.tip(tr, setdiff(tr$tip.label, species_for_tree))
+})
+
+#Make it an object trees
+class(pruned_trees) <- "multiPhylo"
+
+# Save the final trees with the relevant organisms
+write.tree(
+  pruned_trees,
+  file.path(out_dir, "Upham_100trees_pruned_curated_species.tre")
+)
+
+# Print results
+cat("Number of trees:", length(pruned_trees), "\n")
+cat("Tips in first tree:", length(pruned_trees[[1]]$tip.label), "\n")
+```
+
+```{r}
+library(ape)
+library(caper)
+
+
+# Load curated data and pruned 100 trees if not already loaded
+data_pgls <- read.csv(
+  file.path(out_dir, "PGLS_data_curated_Upham.csv"),
+  stringsAsFactors = FALSE
+)
+
+pruned_trees <- read.tree(
+  file.path(out_dir, "Upham_100trees_pruned_curated_species.tre")
+)
+
+# Function to run one PGLS model on one tree
+run_pgls_one_tree <- function(tree, data, response_col) {
+  
+  # Reorder data to match tree tip order - by name
+  data2 <- data[match(tree$tip.label, data$tree_species), ]
+  
+  # Check that matching worked
+  stopifnot(nrow(data2) == length(tree$tip.label))
+  stopifnot(all(tree$tip.label == data2$tree_species))
+  
+  # Build comparative dataset for caper::pgls
+  comp <- comparative.data(
+    phy = tree,
+    data = data2,
+    names.col = tree_species,
+    vcv = TRUE,
+    warn.dropped = FALSE
+  )
+  
+  # Model formula: response variable ~ log brain volume
+  form <- as.formula(paste(response_col, "~ X"))
+  
+  # Run PGLS with Pagel's lambda estimated by ML
+  fit <- pgls(
+    form,
+    data = comp,
+    lambda = "ML"
+  )
+  
+  s <- summary(fit)
+  
+  # Extract model statistics for the effect of X
+  
+  data.frame(
+    response = response_col,
+    lambda = fit$param["lambda"],
+    slope = s$coefficients["X", "Estimate"],
+    SE = s$coefficients["X", "Std. Error"],
+    t = s$coefficients["X", "t value"],
+    p = s$coefficients["X", "Pr(>|t|)"],
+    R2 = s$r.squared
+  )
+}
+
+# Run each PGLS model across all 100 pruned trees and combine the results
+# Y ~ X = heat capacity ~ log brain volume
+# Z ~ X = susceptibility ~ log brain volume
+# W ~ X = metastability ~ log brain volume
+
+responses <- c("Y", "Z", "W")
+
+results_100 <- do.call(rbind, lapply(responses, function(resp) {
+  do.call(rbind, lapply(seq_along(pruned_trees), function(i) {
+    out <- run_pgls_one_tree(pruned_trees[[i]], data_pgls, resp)
+    out$tree_number <- i
+    out
+  }))
+}))
+
+# Save full results
+write.csv(
+  results_100,
+  file.path(out_dir, "PGLS_results_100_Upham_trees.csv"),
+  row.names = FALSE
+)
+
+# Summarize across trees with 95% quantile ranges
+q025 <- function(x) quantile(x, 0.025, na.rm = TRUE)
+q975 <- function(x) quantile(x, 0.975, na.rm = TRUE)
+
+# Summarize PGLS results across the 100 trees
+summary_100 <- do.call(rbind, lapply(split(results_100, results_100$response), function(df) {
+  data.frame(
+    response = unique(df$response),
+    n_trees = nrow(df),
+    
+    lambda_median = median(df$lambda, na.rm = TRUE),
+    lambda_q025 = q025(df$lambda),
+    lambda_q975 = q975(df$lambda),
+    
+    slope_median = median(df$slope, na.rm = TRUE),
+    slope_q025 = q025(df$slope),
+    slope_q975 = q975(df$slope),
+    
+    SE_median = median(df$SE, na.rm = TRUE),
+    
+    p_median = median(df$p, na.rm = TRUE),
+    p_q025 = q025(df$p),
+    p_q975 = q975(df$p),
+    p_max = max(df$p, na.rm = TRUE),
+    
+    R2_median = median(df$R2, na.rm = TRUE)
+  )
+}))
+
+print(summary_100)
+
+write.csv(
+  summary_100,
+  file.path(out_dir, "PGLS_summary_100_Upham_trees_quantile_ranges.csv"),
+  row.names = FALSE
+)
+
+```
+
+# Consensus tree
+
+
+
+```{r}
+# ============================================================
+# HALF-CIRCLE CONSENSUS TREE FIGURE  (publication version)
+#
+# Tree:
+#   50% majority-rule consensus of the 100 time-calibrated Upham trees, with
+#   median divergence times mapped back onto the consensus topology (branch
+#   lengths are real ages in Myr; tree is ultrametric so tips align).
+#
+# Rings (inner -> outer):
+#   Inner ring   : log2 brain volume   (viridis scale; slightly thicker)
+#   Outer ring 1 : Heat capacity
+#   Outer ring 2 : Susceptibility
+#   Outer ring 3 : Metastability        (shared blue-white-red diverging scale)
+# ============================================================
+
+library(ape)
+library(ggplot2)
+library(ggtree)
+library(ggtreeExtra)
+library(ggnewscale)
+library(dplyr)
+library(tidyr)
+library(grid)
+
+# ============================================================
+# Paths
+# ============================================================
+
+tree_file <- file.path(out_dir, "Upham_100trees_pruned_curated_species.tre")
+data_file <- file.path(out_dir, "PGLS_data_curated_Upham.csv")
+
+out_pdf <- file.path(out_dir, "Consensus_Upham_tree_paper.pdf")
+out_png <- file.path(out_dir, "Consensus_Upham_tree_paper.png")
+
+# ============================================================
+# Read trees and data
+# ============================================================
+
+trees <- read.tree(tree_file)
+class(trees) <- "multiPhylo"
+
+cat("Number of trees:", length(trees), "\n")
+cat("Tips in first tree:", length(trees[[1]]$tip.label), "\n")
+
+df <- read.csv(data_file, stringsAsFactors = FALSE)
+
+if (!"tree_species" %in% colnames(df)) {
+  stop("Column 'tree_species' was not found.")
+}
+
+# Fix names to the tree-name format
+df$Species <- gsub(" ", "_", df$tree_species)
+
+# Keep only rows retained for PGLS, just in case
+if ("drop_from_pgls" %in% colnames(df)) {
+  keep_idx <- is.na(df$drop_from_pgls) |
+    df$drop_from_pgls %in% c(FALSE, "FALSE", "False", 0, "0")
+  df <- df[keep_idx, ]
+}
+
+required_cols <- c("Species", "X", "Y", "Z", "W")
+missing_cols <- setdiff(required_cols, colnames(df))
+if (length(missing_cols) > 0) {
+  stop(paste("Missing required columns:", paste(missing_cols, collapse = ", ")))
+}
+
+df <- df %>%
+  filter(!is.na(Species), !is.na(X), !is.na(Y), !is.na(Z), !is.na(W)) %>%
+  distinct(Species, .keep_all = TRUE)
+
+cat("Species in data after filtering:", nrow(df), "\n")
+
+# ============================================================
+# Build majority-rule consensus tree
+# ============================================================
+
+cons_tree <- consensus(trees, p = 0.5)
+
+common_species <- intersect(cons_tree$tip.label, df$Species)
+cat("Species shared between consensus tree and data:", length(common_species), "\n")
+
+cons_tree <- drop.tip(cons_tree, setdiff(cons_tree$tip.label, common_species))
+
+df <- df %>% filter(Species %in% common_species)
+df <- df[match(cons_tree$tip.label, df$Species), ]
+stopifnot(all(df$Species == cons_tree$tip.label))
+
+# Rearrange branch order for a cleaner ladder
+cons_tree <- ladderize(cons_tree, right = FALSE)
+df <- df[match(cons_tree$tip.label, df$Species), ]
+stopifnot(all(df$Species == cons_tree$tip.label))
+
+# ------------------------------------------------------------
+# Real (time-calibrated) branch lengths for the consensus topology
+# ------------------------------------------------------------
+# The majority-rule consensus carries no branch lengths. Rather than invent
+# arbitrary ones, map median divergence times from the 100 time-calibrated
+# Upham trees onto the consensus topology: for each internal node take its
+# descendant-tip set, find that set's MRCA in each of the 100 trees, read the
+# MRCA's age (time before present), and assign the median across trees. Tips are
+# fixed at age 0, so the tree is ultrametric (tips aligned -> clean rings) and
+# every branch length is a median divergence time in millions of years.
+# Because each consensus node's tip set is a superset of its children's, its
+# MRCA is an ancestor of theirs in every tree, so ages are monotone down the
+# tree and all branch lengths are non-negative.
+add_consensus_divergence_times <- function(cons, trees) {
+  ntip   <- length(cons$tip.label)
+  inodes <- (ntip + 1):(ntip + cons$Nnode)
+
+  # descendant tip labels of each consensus internal node
+  desc <- lapply(inodes, function(nd) extract.clade(cons, nd)$tip.label)
+
+  # age (time before present) of every node, per tree
+  tree_age <- lapply(trees, function(tr) {
+    d <- node.depth.edgelength(tr)   # root-to-node distance
+    max(d) - d                       # -> time before present (tips ~ 0)
+  })
+
+  # median MRCA age across the 100 trees for each consensus node
+  age <- numeric(ntip + cons$Nnode)  # tips stay 0
+  for (k in seq_along(inodes)) {
+    tips_k <- desc[[k]]
+    ages_k <- vapply(seq_along(trees), function(i) {
+      tree_age[[i]][getMRCA(trees[[i]], tips_k)]
+    }, numeric(1))
+    age[inodes[k]] <- median(ages_k, na.rm = TRUE)
+  }
+
+  # branch length = parent age - child age (>= 0 by construction)
+  cons$edge.length <- age[cons$edge[, 1]] - age[cons$edge[, 2]]
+  cons
+}
+
+cons_tree <- add_consensus_divergence_times(cons_tree, trees)
+
+stopifnot(all(cons_tree$edge.length >= 0))   # no negative branches
+cat("Root age (median across 100 trees, Myr):",
+    round(max(node.depth.edgelength(cons_tree)), 1), "\n")
+cat("Final number of species in figure:", nrow(df), "\n")
+
+# ============================================================
+# Display labels: underscores -> spaces
+# ============================================================
+
+label_df <- data.frame(
+  Species       = df$Species,
+  Species_label = gsub("_", " ", df$Species),
+  stringsAsFactors = FALSE
+)
+
+# ============================================================
+# Ring data
+# ============================================================
+
+# Inner thick ring: log2 brain volume (original scale)
+x_ring <- df %>%
+  transmute(Species = Species, Ring = "log2 brain volume", Value = X)
+
+# Three outer rings, each trait scaled independently
+# (0 = average, + = high, - = low) so they share one diverging scale
+outer_rings <- df %>%
+  transmute(
+    Species          = Species,
+    `Heat capacity`  = as.numeric(scale(Y)),
+    `Susceptibility` = as.numeric(scale(Z)),
+    `Metastability`  = as.numeric(scale(W))
+  ) %>%
+  pivot_longer(
+    cols = c(`Heat capacity`, `Susceptibility`, `Metastability`),
+    names_to = "Ring", values_to = "Value"
+  )
+
+outer_rings$Value[is.na(outer_rings$Value)] <- 0
+
+outer_rings$Ring <- factor(
+  outer_rings$Ring,
+  levels = c("Heat capacity", "Susceptibility", "Metastability")
+)
+
+trait_lim <- max(abs(outer_rings$Value), na.rm = TRUE)
+
+# ----- alignment safety checks -----
+stopifnot(setequal(x_ring$Species, cons_tree$tip.label))
+stopifnot(all(table(x_ring$Species) == 1))
+stopifnot(setequal(outer_rings$Species, cons_tree$tip.label))
+stopifnot(all(table(outer_rings$Species) == 3))
+cat("Ring alignment checks passed.\n")
+
+# ============================================================
+# Base tree
+# ============================================================
+
+p <- ggtree(cons_tree, layout = "fan", open.angle = 180)
+
+p$data <- p$data %>%
+  left_join(label_df, by = c("label" = "Species"))
+
+
+tree_depth   <- max(node.depth.edgelength(cons_tree))
+lab_offset   <- 0.45 * tree_depth   # labels just past the outer ring
+brain_pwidth <- 0.14 * tree_depth   # single-category inner ring (absolute width)
+
+p <- p +
+  geom_tree(color = "grey45", linewidth = 0.72) +
+  geom_tiplab2(
+    aes(label = Species_label),
+    size     = 2.0,
+    offset   = lab_offset,   # past the outer ring, hugging the arc
+    align    = FALSE,
+    linesize = 0,
+    fontface = "italic"
+  )
+
+# ============================================================
+# Legend sizing
+# ============================================================
+
+legend_bar_width  <- unit(120, "pt")
+legend_bar_height <- unit(8, "pt")
+
+# ============================================================
+# Inner thick ring: log2 brain volume
+# ============================================================
+
+p <- p +
+  geom_fruit(
+    data    = x_ring,
+    geom    = geom_tile,
+    mapping = aes(y = Species, x = Ring, fill = Value),
+    offset  = 0.040,       # close to the tree tips
+    pwidth  = brain_pwidth, # absolute width (scaled to tree depth); ~slightly thicker than each trait arc
+    color     = "grey93",
+    linewidth = 0.08,
+    grid.params = list()
+  ) +
+  scale_fill_gradientn(
+    # Viridis (purple -> teal -> green -> yellow). The green/teal band does not
+    # occur in the blue-white-red trait scale, so the inner ring is clearly a
+    # different colour scheme rather than looking like another trait ring.
+    colours = c("#440154", "#414487", "#2A788E", "#22A884", "#7AD151", "#FDE725"),
+    limits  = range(x_ring$Value, na.rm = TRUE),
+    name    = "Inner thick ring: log2 brain volume",
+    guide   = guide_colorbar(
+      direction = "horizontal", title.position = "top", title.hjust = 0,
+      barwidth = legend_bar_width, barheight = legend_bar_height
+    )
+  )
+
+# ============================================================
+# Outer rings: Heat capacity, Susceptibility, Metastability
+# ============================================================
+
+p <- p +
+  new_scale_fill() +
+  geom_fruit(
+    data    = outer_rings,
+    geom    = geom_tile,
+    mapping = aes(y = Species, x = Ring, fill = Value),
+    offset  = 0.010,   # close to the inner brain ring
+    # Three equal trait arcs: total band 0.24 -> 0.08 each, slightly thinner
+    # than the brain ring so the inner (key) variable reads as slightly thicker.
+    pwidth  = 0.24,
+    color     = "grey94",
+    linewidth = 0.08,
+    grid.params = list()
+  ) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "#F7F7F7", high = "#B2182B",
+    midpoint = 0, limits = c(-trait_lim, trait_lim),
+    name   = "Outer rings, inner → outer:\nHeat capacity, Susceptibility, Metastability",
+    breaks = c(-trait_lim, 0, trait_lim),
+    labels = c("Low", "Average", "High"),
+    guide  = guide_colorbar(
+      direction = "horizontal", title.position = "top", title.hjust = 0,
+      barwidth = legend_bar_width, barheight = legend_bar_height
+    )
+  ) +
+  labs(
+    caption = paste(
+      "Grey branches = majority-rule consensus phylogeny.",
+      "Thick inner ring = log2 brain volume.",
+      "Outer rings, inner to outer = heat capacity, susceptibility, metastability."
+    )
+  ) +
+  theme(
+    legend.position   = "bottom",
+    legend.box        = "horizontal",
+    legend.box.just   = "center",
+    legend.justification = "center",
+    legend.title      = element_text(size = 10),
+    legend.text       = element_text(size = 8.5),
+    plot.caption      = element_text(size = 9, hjust = 0.5),
+    # Room for the (now unclipped) tip labels to render past the panel edge.
+    plot.margin       = margin(t = 30, r = 30, b = 8, l = 30),
+    legend.box.spacing = unit(0.10, "cm"),
+    legend.spacing.x   = unit(0.6, "cm"),
+    legend.margin      = margin(t = 0, r = 0, b = 0, l = 0)
+  )
+
+
+p$coordinates$clip <- "off"
+
+# ============================================================
+# Save figure, with a to-scale time scale bar in the bottom legend area
+# ============================================================
+
+fig_w <- 12; fig_h <- 8
+bar_Myr <- 50
+
+
+# 0.152 = fraction of the page width spanned by the tree depth (172.6 Myr)
+# in this 12 x 8 in figure. Re-measure if the figure size or the tree changes.
+npc_per_Myr <- 0.152 / 172.6
+
+draw_scalebar <- function() {
+  print(p)
+  bar_npc <- bar_Myr * npc_per_Myr
+  cx <- 0.5; by <- 0.30; th <- 0.012        # centre-x, baseline-y, tick height (npc)
+  gp <- gpar(lwd = 2.5, col = "black", lineend = "butt")
+  grid.lines(unit(c(cx - bar_npc/2, cx + bar_npc/2), "npc"), unit(c(by, by), "npc"), gp = gp)
+  grid.lines(unit(c(cx - bar_npc/2, cx - bar_npc/2), "npc"), unit(c(by, by + th), "npc"), gp = gp)
+  grid.lines(unit(c(cx + bar_npc/2, cx + bar_npc/2), "npc"), unit(c(by, by + th), "npc"), gp = gp)
+  grid.text(paste(bar_Myr, "Myr"), unit(cx, "npc"), unit(by - 0.028, "npc"),
+            gp = gpar(fontsize = 10, col = "black"))
+}
+
+png(out_png, width = fig_w, height = fig_h, units = "in", res = 600); draw_scalebar(); dev.off()
+pdf(out_pdf, width = fig_w, height = fig_h);                          draw_scalebar(); dev.off()
+
+p
+
+```
+
+
+
+
+
+
+
+# Blomberg's K
+
+```{r}
+library(phytools)
+
+# Blomberg's K across the same 100 trees and same data used for PGLS
+# X = log brain volume
+# Y = heat capacity
+# Z = susceptibility
+# W = metastability
+
+# The p-values come from random permutations, so they vary slightly between
+# runs. The values reported in the paper are in results_published/.
+
+# Function to calculate Blomberg's K for one trait on one tree
+run_K_one_tree <- function(tree, data, trait_col, nsim = 999) {
+  
+  # Match the data order to the order of species in the tree
+  data2 <- data[match(tree$tip.label, data$tree_species), ]
+  
+  # Safety checks: same logic as in the PGLS function
+  stopifnot(!any(is.na(data2$tree_species)))
+  stopifnot(nrow(data2) == length(tree$tip.label))
+  stopifnot(all(tree$tip.label == data2$tree_species))
+  
+  # Create a named vector of trait values, with species names as labels
+  trait_vec <- setNames(data2[[trait_col]], data2$tree_species)
+  
+  # Calculate Blomberg's K and test significance by simulation
+  K_result <- phylosig(
+    tree,
+    trait_vec,
+    method = "K",
+    test = TRUE,
+    nsim = nsim
+  )
+  
+  # Return the trait name, K value, and p-value
+  data.frame(
+    trait = trait_col,
+    K = as.numeric(K_result$K),
+    p = as.numeric(K_result$P)
+  )
+}
+
+# Traits for which Blomberg's K will be calculated
+traits <- c("X", "Y", "Z", "W")
+
+# Run Blomberg's K for each trait across all 100 trees
+K_results_100 <- do.call(rbind, lapply(traits, function(trait_name) {
+  do.call(rbind, lapply(seq_along(pruned_trees), function(i) {
+    out <- run_K_one_tree(
+      tree = pruned_trees[[i]],
+      data = data_pgls,
+      trait_col = trait_name,
+      # Randomly shuffle the trait values across the tips 999 times
+      nsim = 999
+    )
+    # Add the tree number so results can be traced back to each tree
+    out$tree_number <- i
+    out
+  }))
+}))
+
+# Save full results
+write.csv(
+  K_results_100,
+  file.path(out_dir, "Blombergs_K_results_100_Upham_trees.csv"),
+  row.names = FALSE
+)
+
+# Summarize across trees
+q025 <- function(x) quantile(x, 0.025, na.rm = TRUE)
+q975 <- function(x) quantile(x, 0.975, na.rm = TRUE)
+
+K_summary_100 <- do.call(rbind, lapply(split(K_results_100, K_results_100$trait), function(df) {
+  data.frame(
+    trait = unique(df$trait),
+    n_trees = nrow(df),
+    
+    K_median = median(df$K, na.rm = TRUE),
+    K_q025 = q025(df$K),
+    K_q975 = q975(df$K),
+    
+    p_median = median(df$p, na.rm = TRUE),
+    p_q025 = q025(df$p),
+    p_q975 = q975(df$p),
+    p_max = max(df$p, na.rm = TRUE)
+  )
+}))
+
+print(K_summary_100)
+
+write.csv(
+  K_summary_100,
+  file.path(out_dir, "Blombergs_K_summary_100_Upham_trees.csv"),
+  row.names = FALSE
+)
+```
+
+
